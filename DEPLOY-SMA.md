@@ -114,6 +114,39 @@ volume. `./tester-env reset` removes the container, both volumes and the network
 next `deploy` rebuilds the image only if the source changed. Database format is 22 for
 this tag, so do not bake a database fixture across releases — seed through the API.
 
+## Evidence
+
+Fork integration 2026-11-18, from a fresh submodule checkout of
+`tester-env-baseline` (commit `46cf3de8b8239eb6321b3bdd96fa7b0396e12f21`):
+
+```bash
+cd apps/duplicati
+IMAGE_TAG=tester-env-duplicati:integrator-check ./tester-env deploy --run-id integrator --port 8391
+./tester-env seed --run-id integrator --port 8391    # idempotency re-run
+./tester-env reset --run-id integrator --port 8391
+```
+
+- `deploy` built from editable source, was healthy in 3s, and passed `verify`
+  (`/ngclient/login` SPA shell, `auth/status` `authorized:false`, login token) plus
+  `seed` + `verify-seed`: 4 backups created, Studio Documents and Project Files run
+  once, version counts 1/1/none/none, schedules 1W/1M/none/none, 7 fixture paths
+  present, run destinations populated, never-run destinations empty.
+- The second `seed` was a no-op ("already run: Studio Documents / Project Files"),
+  so seeding is idempotent.
+- `reset` removed only its own container, network and both volumes; the image was
+  kept. The default run on port 8291 was left untouched during this check.
+- Earlier gates on the same tooling: cold build 132 s, C#-edit rebuild 51 s, warm
+  reset+deploy+verify 7.5 s; two reset+deploy cycles reproduced a byte-identical
+  normalized seed fingerprint; browser smoke (login + wizard-created backup card)
+  passed.
+
+Browser evidence for the seeded state, from browser-checker 2026-11-18 (reported by
+the orchestrator; fork-integrator ran no browser): at
+`http://host.docker.internal:8291/ngclient/` Home > My backups lists the four
+backups, Studio Documents and Project Files show "1 Version", Photo Archive and
+Website Snapshot show "No version yet"; Edit backup shows the `/fixtures` source
+tree with the `*.tmp` exclusion and the "Every week" / "Every month" schedules.
+
 ## Caveats
 
 - The modern UI is a prebuilt npm package, not editable here: no client-side-only
