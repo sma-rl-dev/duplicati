@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1.7
+# Source build for Duplicati Server (tester-env prospect).
+#
+# Upstream's ReleaseBuilder image only COPYs prebuilt per-arch release binaries,
+# which is not an acceptable mutation path. This file builds the server from the
+# checked-out tree and publishes the single Executable project:
+#   Executables/Duplicati.Server  (the slnx also pulls proprietary + Windows-only projects)
+
+# Vendor the modern UI. Release builds serve webroot/ngclient only; the runtime
+# npm download is #if DEBUG, so the lockfile-pinned tarball must be in the image.
+FROM node:22-alpine AS spa
+WORKDIR /spa
+COPY Duplicati/Server/webroot/ngclient/package.json Duplicati/Server/webroot/ngclient/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci --ignore-scripts --no-audit --no-fund
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/root/.nuget/packages,sharing=locked \
+    dotnet restore Executables/Duplicati.Server/Duplicati.Server.csproj
+COPY --from=spa /spa/node_modules/@duplicati/ngclient/ ./Duplicati/Server/webroot/ngclient/
+RUN --mount=type=cache,target=/root/.nuget/packages,sharing=locked \
+    dotnet publish Executables/Duplicati.Server/Duplicati.Server.csproj \
+      -c Release --no-restore -o /out/publish
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates tzdata \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build /out/publish ./
+# Read-only source tree for the deterministic seed (tester-env-seed.py): the
+# backups point at /fixtures, so a reset only has to recreate the API records.
+COPY .tester-env-fixtures/ /fixtures/
+# `app` (uid 1654) ships in the aspnet image. The data/backup folders are named
+# volumes, so their ownership is inherited from here on first creation; that is
+# what satisfies Duplicati's insecure-datafolder guard without extra flags.
+RUN install -d -m 700 -o app -g app /data /backups
+ENV DUPLICATI_HOME=/data \
+    HOME=/home/app \
+    DOTNET_RUNNING_IN_CONTAINER=true
+USER app
+EXPOSE 8200
+HEALTHCHECK --interval=5s --timeout=3s --start-period=20s --retries=24 \
+    CMD curl -fsS http://127.0.0.1:8200/ >/dev/null || exit 1
+ENTRYPOINT ["dotnet", "/app/Duplicati.Server.dll"]

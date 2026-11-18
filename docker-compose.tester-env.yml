@@ -1,0 +1,40 @@
+# tester-env deployment overlay for Duplicati (see ./tester-env).
+# Named volumes are pre-named so the CLI's `reset` (down -v) and parallel RUN_IDs
+# stay isolated. No external database or cache service is needed: server state is
+# one embedded SQLite database inside the data folder.
+services:
+  duplicati:
+    image: ${IMAGE_TAG:-tester-env-duplicati:dev}
+    build:
+      context: .
+      dockerfile: Dockerfile.tester-env
+    container_name: ${CONTAINER_NAME}
+    restart: unless-stopped
+    ports:
+      - "${PORT}:8200"
+    environment:
+      DUPLICATI_HOME: /data
+      # Deterministic setup; see DEPLOY-SMA.md. Passed as env vars rather than
+      # argv so the password never shows up in `docker ps`/compose config diffs.
+      DUPLICATI__WEBSERVICE_INTERFACE: any
+      DUPLICATI__WEBSERVICE_PORT: "8200"
+      DUPLICATI__WEBSERVICE_PASSWORD: ${DUPLICATI_PASSWORD}
+      DUPLICATI__WEBSERVICE_SUPPRESS_WELCOME_PAGE: "true"
+      DUPLICATI__WEBSERVICE_DISABLE_SIGNIN_TOKENS: "true"
+      DUPLICATI__WEBSERVICE_TIMEZONE: UTC
+      # The browser container reaches the app by hostname (host.docker.internal
+      # or the bridge gateway); Duplicati rejects non-localhost hostnames.
+      DUPLICATI__WEBSERVICE_ALLOWED_HOSTNAMES: "*"
+      DUPLICATI__DISABLE_UPDATE_CHECK: "true"
+      DUPLICATI__REDUCED_REPORTING: "true"
+      DUPLICATI__DISABLE_DB_ENCRYPTION: "true"
+      DUPLICATI__SERVER_DATAFOLDER: /data
+    volumes:
+      - data:/data
+      - backups:/backups
+
+volumes:
+  data:
+    name: ${DATA_VOLUME}
+  backups:
+    name: ${BACKUP_VOLUME}

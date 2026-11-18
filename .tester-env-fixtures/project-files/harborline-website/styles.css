@@ -1,0 +1,11 @@
+:root {
+  --deep-harbour: #12405a;
+  --brass: #c9a227;
+}
+
+body {
+  margin: 0;
+  font-family: serif;
+  color: var(--deep-harbour);
+  background: #f7f5f0;
+}

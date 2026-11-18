@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "app": "duplicati",
+  "seed_profile": "default",
+  "requirements": {
+    "auth-login": {
+      "status": "present",
+      "evidence": "Seed logs in with the fixed web UI password (Duplicati!2026) through POST /api/v1/auth/login; ./tester-env verify asserts the login API, so the seeded state is reachable over the browser's /ngclient/login."
+    },
+    "backup-list": {
+      "status": "present",
+      "evidence": "Seed creates 4 backups through POST /api/v1/backups: Studio Documents, Project Files, Photo Archive, Website Snapshot. Browser: Home > My backups lists all four cards with the Local destination badge."
+    },
+    "backup-versions": {
+      "status": "present",
+      "evidence": "Studio Documents and Project Files are run once by the seed, so their cards show '1 Version' with Last successful backup, Source and Destination sizes; nothing else creates versions. verify asserts one fileset each and TargetFilesetsCount=1."
+    },
+    "backup-empty-state": {
+      "status": "present",
+      "evidence": "Photo Archive and Website Snapshot are never run: their cards show 'No version yet', 'Last successful backup: N/A', and the destination folders are empty. verify asserts LastBackupStarted is absent and the destination holds no files."
+    },
+    "backup-detail-sources": {
+      "status": "present",
+      "evidence": "Sources are /fixtures/studio-documents/, /fixtures/project-files/, /fixtures/photo-archive/ and /fixtures/website-snapshot/. Browser: Edit backup > Source Data shows the /fixtures folder tree and the individual files with sizes."
+    },
+    "backup-destination-local": {
+      "status": "present",
+      "evidence": "Every backup targets a local file-system folder: file:///backups/<name>/. Browser: Edit backup > Destination shows the Local destination; the cards show the Local badge."
+    },
+    "backup-schedule-mix": {
+      "status": "present",
+      "evidence": "Studio Documents repeats every week (all days) and Project Files every month; Photo Archive and Website Snapshot have no schedule. Browser: Edit backup > Schedule shows 'Every week' / 'Every month' / the manual option; Home's Order by and Time/Details filters expose scheduled vs manual."
+    },
+    "backup-retention-settings": {
+      "status": "present",
+      "evidence": "Studio Documents carries keep-versions 5 and Project Files keep-versions 3; every backup stores the fixed passphrase Harborline-Studio-2026. verify asserts the keep-versions value on Studio Documents."
+    },
+    "backup-file-filter": {
+      "status": "present",
+      "evidence": "Studio Documents excludes *.tmp; the tree holds old-planning-notes.tmp and the source count stays at 4 files, so the filtered file is visibly excluded from the backup (verify asserts SourceFilesCount=4)."
+    },
+    "backup-run-history": {
+      "status": "present",
+      "evidence": "The two seeded runs leave a backup log entry per run with MainOperation Backup and ParsedResult Success, and Last backup time on the cards; ./tester-env verify-seed asserts the recorded run and version counts, and the destination folders hold dlist/dindex/dblock pairs."
+    },
+    "seed-file-fixtures": {
+      "status": "present",
+      "evidence": "13 committed fixture files are baked into the image at /fixtures (handbook, brand guidelines, contract, invoice, website sources, brand palette, type specimen, two shoot notes, portfolio export plus one excluded .tmp (12 are backed up)). verify asserts the files exist in the container and their deterministic sizes feed the visible Source size values."
+    }
+  }
+}

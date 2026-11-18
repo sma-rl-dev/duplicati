@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Duplicati - Tester Environment CLI
+# Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+# Commands: deploy, start, stop, reset, status, logs, url, seed, verify, verify-seed, help
+
+RUN_ID="default"
+PORT="8291"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tester-env.yml"
+
+# Deterministic setup documented in status/apps/duplicati.toml.
+WEBUI_PASSWORD="${DUPLICATI_PASSWORD:-Duplicati!2026}"
+
+refresh_names() {
+    local suffix=""
+    if [[ "${RUN_ID}" != "default" ]]; then
+        suffix="-${RUN_ID}"
+    fi
+
+    CONTAINER_NAME="tester-env-duplicati${suffix}"
+    # IMAGE_TAG set by scripts/rl-env to a content-addressed tag so identical
+    # (baseline, patch-set) combos share an image. Manual invocations get :dev.
+    IMAGE_NAME="${IMAGE_TAG:-tester-env-duplicati:dev}"
+    DATA_VOLUME="duplicati-data${suffix}"
+    BACKUP_VOLUME="duplicati-backups${suffix}"
+    COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-tester-env-duplicati${suffix}}"
+}
+
+compose() {
+    docker compose \
+        -p "${COMPOSE_PROJECT}" \
+        -f "${COMPOSE_FILE}" \
+        --project-directory "${SCRIPT_DIR}" \
+        "$@"
+}
+
+compose_env() {
+    COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT}" \
+    CONTAINER_NAME="${CONTAINER_NAME}" \
+    IMAGE_TAG="${IMAGE_NAME}" \
+    PORT="${PORT}" \
+    DATA_VOLUME="${DATA_VOLUME}" \
+    BACKUP_VOLUME="${BACKUP_VOLUME}" \
+    DUPLICATI_PASSWORD="${WEBUI_PASSWORD}" \
+    compose "$@"
+}
+
+wait_for_health() {
+    local attempt
+    for attempt in $(seq 1 90); do
+        if curl -fsS "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
+            echo "==> App healthy after ${attempt}s"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Error: app did not become healthy at http://127.0.0.1:${PORT}/" >&2
+    compose_env logs --tail 80 >&2 || true
+    exit 1
+}
+
+seed_env() {
+    python3 "${SCRIPT_DIR}/tester-env-seed.py" "$@" --base-url "http://127.0.0.1:${PORT}" --container "${CONTAINER_NAME}"
+}
+
+cmd_seed() {
+    require_running
+    echo "==> Seeding deterministic Harborline Studio backups (API, no browser)..."
+    seed_env seed
+}
+
+cmd_verify_seed() {
+    require_running
+    echo "==> Verifying seeded backups, versions, schedules, fixtures and destinations..."
+    seed_env verify
+}
+
+cmd_deploy() {
+    echo "==> Building image from source: ${IMAGE_NAME}..."
+    echo "    (dotnet sdk 10.0 publish of Executables/Duplicati.Server + lockfile-pinned ngclient SPA)"
+
+    echo "==> Starting container ${CONTAINER_NAME} on port ${PORT}..."
+    compose_env up -d --build
+
+    wait_for_health
+    cmd_verify
+    cmd_seed
+    cmd_verify_seed
+
+    echo "==> Deployment complete."
+    echo "    URL:      http://localhost:${PORT}/"
+    echo "    Browser:  ${TESTER_ENV_BROWSER_ORIGIN:-http://host.docker.internal:${PORT}}/"
+    echo "    Login:    ${WEBUI_PASSWORD}"
+}
+
+require_running() {
+    if ! compose_env ps --status running --format '{{.Name}}' 2>/dev/null | grep -qx "${CONTAINER_NAME}"; then
+        echo "Error: container ${CONTAINER_NAME} is not running. Run './tester-env deploy' first." >&2
+        exit 1
+    fi
+}
+
+cmd_start() {
+    echo "==> Starting container ${CONTAINER_NAME} on port ${PORT}..."
+    compose_env up -d
+    wait_for_health
+}
+
+cmd_verify() {
+    require_running
+    echo "==> Verifying ngclient SPA and login API..."
+
+    local index
+    index="$(curl -fsS "http://127.0.0.1:${PORT}/ngclient/login")"
+    if ! grep -q '<app-root' <<<"${index}"; then
+        echo "Error: /ngclient/login did not return the modern SPA (missing-spa fallback?)." >&2
+        exit 1
+    fi
+    echo "    /ngclient/login       serves the Angular SPA shell"
+
+    local status
+    status="$(curl -fsS -X POST "http://127.0.0.1:${PORT}/api/v1/auth/status")"
+    grep -q '"authorized"' <<<"${status}" || { echo "Error: unexpected /api/v1/auth/status: ${status}" >&2; exit 1; }
+    echo "    /api/v1/auth/status   ${status}"
+
+    local body login
+    body="$(python3 -c 'import json,sys;print(json.dumps({"Password":sys.argv[1],"RememberMe":False}))' "${WEBUI_PASSWORD}")"
+    login="$(curl -fsS -X POST "http://127.0.0.1:${PORT}/api/v1/auth/login" \
+        -H 'Content-Type: application/json' --data-binary "${body}")"
+    grep -q '"AccessToken"' <<<"${login}" || { echo "Error: login did not return an AccessToken: ${login}" >&2; exit 1; }
+    echo "    /api/v1/auth/login    returns an access token for the fixed password"
+
+    echo "==> Verify passed."
+}
+
+cmd_reset() {
+    echo "==> Resetting environment..."
+    compose_env down --volumes --remove-orphans || true
+    echo "==> Reset complete (data and backup volumes removed). Run 'deploy' to start fresh."
+}
+
+cmd_stop() {
+    echo "==> Stopping container (volumes preserved)..."
+    compose_env down
+}
+
+cmd_logs() {
+    compose_env logs -f --tail 100 "$@"
+}
+
+cmd_status() {
+    if compose_env ps --status running --format '{{.Name}}' 2>/dev/null | grep -qx "${CONTAINER_NAME}"; then
+        echo "Status: RUNNING"
+        echo "URL: http://localhost:${PORT}/"
+        echo "Browser URL: ${TESTER_ENV_BROWSER_ORIGIN:-http://host.docker.internal:${PORT}}/"
+        echo "Container: ${CONTAINER_NAME}"
+        echo "Image: ${IMAGE_NAME}"
+        echo "Login: ${WEBUI_PASSWORD}"
+    else
+        echo "Status: NOT RUNNING"
+    fi
+}
+
+cmd_url() {
+    echo "http://localhost:${PORT}/"
+    echo "browser: ${TESTER_ENV_BROWSER_ORIGIN:-http://host.docker.internal:${PORT}}/"
+}
+
+cmd_help() {
+    cat <<EOF
+Duplicati - Tester Environment CLI
+
+Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+
+Commands:
+  deploy    Build the image from source, start, seed and verify (alias: up)
+  start     Start an already-built container and wait for health (alias: up-only)
+  seed      Re-run the idempotent deterministic seed (4 backups, 2 backups run)
+  verify    Assert the SPA, login API and the seeded backup state
+  verify-seed  Assert only the seeded backup state
+  reset     Remove container and the data/backup volumes
+  stop      Stop the container and keep volumes (alias: down)
+  logs      Follow container logs
+  status    Show whether the app is running and on which port
+  url       Print the host URL and the browser-visible URL
+  help      Show this help
+
+Options:
+  --run-id <id>   Isolate container/compose project/volumes for parallel runs. Default: default
+  --port <port>   Host port bound to container port 8200. Default: 8291
+
+Typical workflow:
+  ./tester-env deploy    # Build from source, start, seed, verify
+  ./tester-env reset     # Clean slate
+
+Seed data (Harborline Studio, small design studio):
+  - 4 backups created through POST /api/v1/backups: Studio Documents
+    (weekly, keep-versions 5, excludes *.tmp), Project Files (monthly,
+    keep-versions 3), Photo Archive and Website Snapshot (manual only).
+  - Studio Documents and Project Files are run once, so Home shows one version
+    and a last-backup time; the other two show "No version yet".
+  - Sources are the read-only /fixtures tree baked into the image; destinations
+    are /backups/<name> on the backup volume.
+  - Schedule anchors are in the future, so no backup fires during an episode.
+  - Passphrase for every backup: Harborline-Studio-2026.
+
+Deployment details:
+  - Baseline: v2.4.1.0_stable_2026-10-29 (3610feb04738c0619406dfb7421919530fb2ca7e)
+  - Dockerfile.tester-env is fork-owned: dotnet sdk:10.0 restore+publish of
+    Executables/Duplicati.Server -c Release -> aspnet:10.0 runtime, non-root.
+  - The SPA is vendored at build time from the tree's lockfile-pinned
+    @duplicati/ngclient tarball; Release would otherwise serve missing-spa.html.
+  - Deterministic flags come from env vars in docker-compose.tester-env.yml:
+    fixed webservice password, suppressed welcome page, UTC timezone, no update
+    check, reduced reporting, db encryption disabled, allowed hostnames '*'.
+  - State is the whole /data folder (embedded SQLite) + /backups destination,
+    both named volumes; ./tester-env reset drops them.
+  - Credentials: ${WEBUI_PASSWORD} (override with DUPLICATI_PASSWORD).
+
+Environment:
+  IMAGE_TAG                  Content-addressed image tag exported by scripts/rl-env
+  TESTER_ENV_BROWSER_ORIGIN  Browser-visible origin for container browsers
+  DUPLICATI_PASSWORD         Override the fixed web UI password
+  PORT                       Host port (same as --port)
+
+Caveats:
+  - The modern UI is a prebuilt npm package, not editable in this tree; backend
+    (C#) mutants rebuild in ~1 min with warm layers.
+  - Timestamps are clock-dependent; assert counts/labels/states instead.
+  - No-email/no-cloud: local file-system destinations only.
+EOF
+}
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --run-id)
+                RUN_ID="${2:?--run-id requires a value}"
+                shift 2
+                ;;
+            --port)
+                PORT="${2:?--port requires a value}"
+                shift 2
+                ;;
+            --help|-h)
+                cmd_help
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                cmd_help
+                exit 1
+                ;;
+        esac
+    done
+
+    refresh_names
+
+    case "${cmd}" in
+        deploy|up) cmd_deploy ;;
+        start) cmd_start ;;
+        verify) cmd_verify; cmd_verify_seed ;;
+        seed) cmd_seed ;;
+        verify-seed) cmd_verify_seed ;;
+        reset) cmd_reset ;;
+        stop|down) cmd_stop ;;
+        logs) cmd_logs ;;
+        status) cmd_status ;;
+        url) cmd_url ;;
+        help|--help|-h) cmd_help ;;
+        *)
+            echo "Unknown command: ${cmd}" >&2
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
